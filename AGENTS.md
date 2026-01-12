@@ -1,98 +1,223 @@
-# Microbot API Guide (for Claude)
+# agents.md
 
-## Scope & Paths
-- Primary plugin code: `runelite-client/src/main/java/net/runelite/client/plugins/microbot`.
-- Queryable API docs: `.../microbot/api/QUERYABLE_API.md`; quick read: `api/README.md`.
-- Keep new scripts inside the microbot plugin; share helpers under `microbot/util`.
-- Config UI for microbot plugins is rendered via `plugins/microbot/ui/MicrobotConfigPanel` (not the default RuneLite config panel); put config UI changes there.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Paths & Builds
-- Plugin sources live in `runelite-client/src/main/java/net/runelite/client/plugins/microbot`.
-- The queryable API lives in `.../microbot/api`; full guide: `.../microbot/api/QUERYABLE_API.md`.
-- Quick builds: `./gradlew :runelite-client:compileJava`; full build: `./gradlew build`.
+## Overview
 
-## Cache & Queryable API
+Microbot Hub is a community plugin repository for the Microbot RuneLite client. It maintains a separation between core client functionality and community-contributed plugins, allowing rapid plugin development without affecting client stability. Each plugin is independently built, versioned, and packaged for GitHub Releases.
 
-### Singleton Pattern
-All caches are `@Singleton` classes injected via Guice and exposed through `Microbot` static getters:
+## Build System Architecture
 
+The build system uses **Gradle with custom plugin discovery and packaging**:
+
+- **Dynamic Plugin Discovery**: `build.gradle` scans `src/main/java/net/runelite/client/plugins/microbot/` for directories containing `*Plugin.java` files
+- **Per-Plugin Source Sets**: Each discovered plugin gets its own Gradle source set, compile task, and shadow JAR task
+- **Gradle Helper Scripts**: Core build logic lives in:
+  - `gradle/project-config.gradle` - centralized configuration (JDK version, paths, GitHub release URLs, client version)
+  - `gradle/plugin-utils.gradle` - plugin discovery, descriptor parsing, JAR creation, SHA256 hashing
+
+### Build Commands
+
+```bash
+# Build all plugins
+./gradlew clean build
+
+# Build specific plugin(s) only (much faster for iteration)
+./gradlew build -PpluginList=PestControlPlugin
+./gradlew build -PpluginList=PestControlPlugin,AutoMiningPlugin
+
+# Run tests (tests have access to all plugin source sets)
+./gradlew test
+
+# Generate plugins.json metadata file with SHA256 hashes (requires exact JDK 11)
+./gradlew generatePluginsJson
+
+# Copy plugin documentation to public/docs/
+./gradlew copyPluginDocs
+
+# Launch RuneLite debug session with plugins from Microbot.java
+./gradlew run --args='--debug'
+
+# Validate JDK version
+./gradlew validateJdkVersion
+```
+
+## Plugin Structure
+
+Each plugin lives in its own package under `src/main/java/net/runelite/client/plugins/microbot/<pluginname>/`:
+
+```
+<pluginname>/
+├── <PluginName>Plugin.java    # Main plugin class with @PluginDescriptor
+├── <PluginName>Script.java    # Script logic extending Script class
+├── <PluginName>Config.java    # Configuration interface (optional)
+├── <PluginName>Overlay.java   # UI overlay (optional)
+└── Additional support classes
+```
+
+Matching resources under `src/main/resources/net/runelite/client/plugins/microbot/<pluginname>/`:
+
+```
+<pluginname>/
+├── dependencies.txt           # Maven coordinates (optional)
+└── docs/
+    ├── README.md              # Plugin documentation
+    └── assets/                # Screenshots, icons, etc.
+```
+
+## Plugin Descriptor Anatomy
+
+Every plugin **must** have a `@PluginDescriptor` annotation with these **required** fields:
+
+- `name` - Display name (use `PluginConstants.DEFAULT_PREFIX` or create custom prefix)
+- `version` - Semantic version string (store in `static final String version` field)
+- `minClientVersion` - Minimum Microbot client version required
+
+Important **optional** fields:
+
+- `authors` - Array of author names
+- `description` - Brief description shown in plugin panel
+- `tags` - Array of tags for categorization
+- `iconUrl` - URL to icon image (shown in client hub)
+- `cardUrl` - URL to card image (shown on website)
+- `enabledByDefault` - Use `PluginConstants.DEFAULT_ENABLED` (currently `false`)
+- `isExternal` - Use `PluginConstants.IS_EXTERNAL` (currently `true`)
+
+Example:
 ```java
-@Singleton
-public final class Rs2NpcCache {
-    @Inject
-    public Rs2NpcCache(Client client, ClientThread clientThread) { ... }
-
-    public Stream<Rs2NpcModel> getStream() { ... }
-    public Rs2NpcQueryable query() { return new Rs2NpcQueryable(); }
+@PluginDescriptor(
+    name = PluginConstants.MOCROSOFT + "Pest Control",
+    description = "Supports all boats, portals, and shields.",
+    tags = {"pest control", "minigames"},
+    authors = { "Mocrosoft" },
+    version = PestControlPlugin.version,
+    minClientVersion = "1.9.6",
+    iconUrl = "https://chsami.github.io/Microbot-Hub/PestControlPlugin/assets/icon.png",
+    cardUrl = "https://chsami.github.io/Microbot-Hub/PestControlPlugin/assets/card.png",
+    enabledByDefault = PluginConstants.DEFAULT_ENABLED,
+    isExternal = PluginConstants.IS_EXTERNAL
+)
+@Slf4j
+public class PestControlPlugin extends Plugin {
+    static final String version = "2.2.7";
+    // ...
 }
 ```
 
-### Usage Rules
+## PluginConstants
 
-**CRITICAL:** Never instantiate caches or queryables directly. Always access via `Microbot.getRs2XxxCache()`:
+The `PluginConstants.java` file is **shared across all plugins** (included in each JAR during build). It contains:
+
+- Standardized plugin name prefixes (e.g., `DEFAULT_PREFIX`, `MOCROSOFT`, `BOLADO`)
+- Global defaults: `DEFAULT_ENABLED = false`, `IS_EXTERNAL = true`
+
+When creating a new plugin prefix, add it to `PluginConstants.java` for consistency.
+
+## Adding External Dependencies
+
+If a plugin needs additional libraries beyond the Microbot client:
+
+1. Create `src/main/resources/net/runelite/client/plugins/microbot/<pluginname>/dependencies.txt`
+2. Add Maven coordinates, one per line:
+   ```
+   com.google.guava:guava:33.2.0-jre
+   org.apache.commons:commons-lang3:3.14.0
+   ```
+3. The build system automatically includes these in the plugin's shadow JAR
+
+## Testing and Debugging Plugins
+
+### Running Plugins in Debug Mode
+
+1. Edit `src/test/java/net/runelite/client/Microbot.java`
+2. Add your plugin class to the `debugPlugins` array:
+   ```java
+   private static final Class<?>[] debugPlugins = {
+       YourPlugin.class,
+       AutoLoginPlugin.class
+   };
+   ```
+3. Run `./gradlew run --args='--debug'` or use your IDE's run configuration
+
+### Running Tests
+
+- Tests live in `src/test/java/`
+- Test classes have access to all plugin source sets (configured in `build.gradle`)
+- Use `./gradlew test` to run all tests
+
+## Version Management
+
+- **Always increment the plugin version** when making changes (even small fixes)
+- Store version in a static field: `static final String version = "1.2.3";`
+- Follow semantic versioning: `MAJOR.MINOR.PATCH`
+- The version is used for JAR naming, GitHub release assets, and `plugins.json` generation
+
+## Git Workflow
+
+Based on recent commits:
+
+- Use conventional commit prefixes: `fix:`, `feat:`, `docs:`, etc.
+- Include PR references when applicable: `fix: description (#123)`
+- Work on feature branches, merge to `development`, create PRs to `main`
+- Current branch: `development`, main branch: `main`
+
+## Publishing Workflow
+
+1. Build plugins: `./gradlew build`
+2. Generate metadata: `./gradlew generatePluginsJson` (requires JDK 11 exactly)
+3. Copy documentation: `./gradlew copyPluginDocs`
+4. Upload `build/libs/<pluginname>-<version>.jar` and updated `public/docs/plugins.json` as assets on the GitHub release tagged with `<version>` (or `latest-release` for the stable tag): `https://github.com/chsami/Microbot-Hub/releases/download/<tag>/<pluginname>-<version>.jar`
+
+## Important Implementation Details
+
+- **Java Version**: JDK 11 (configured in `project-config.gradle` with `TARGET_JDK_VERSION = 11`, vendor `ADOPTIUM`)
+- **Microbot Client Dependency**: Defaults to the latest version resolved via `https://microbot.cloud/api/version/client`, falling back to `2.0.61` if lookup fails. Artifacts come from GitHub Releases (`https://github.com/chsami/Microbot/releases/download/<version>/microbot-<version>.jar`). Override with `-PmicrobotClientVersion=<version>` or `-PmicrobotClientVersion=latest`, or supply a local JAR for offline work via `-PmicrobotClientPath=/absolute/path/to/microbot-<version>.jar`
+- **Plugin Release Tag**: `plugins.json` uses a stable release tag (`latest-release`) so download URLs stay constant: `https://github.com/chsami/Microbot-Hub/releases/download/latest-release/<plugin>-<version>.jar`. Override with `-PpluginsReleaseTag=<tag>` if needed.
+- **Shadow JAR Excludes**: Common exclusions defined in `plugin-utils.gradle` include `docs/**`, `dependencies.txt`, metadata files, and module-info
+- **Reproducible Builds**: JAR tasks disable file timestamps, use reproducible file order, and normalize file permissions to `0644`
+- **Descriptor Parsing**: Build system uses regex to extract plugin metadata from Java source files (see `getPluginDescriptorInfo` in `plugin-utils.gradle`)
+
+## Plugin Discovery Logic
+
+When you run `./gradlew build`:
+
+1. Scans `src/main/java/net/runelite/client/plugins/microbot/` for directories
+2. Finds directories containing a file matching `*Plugin.java`
+3. Creates a plugin object with: `name` (class name without .java), `sourceSetName` (directory name), `dir`, `javaFile`
+4. Filters by `-PpluginList` if provided
+5. For each plugin:
+   - Creates dedicated source set
+   - Configures compilation classpath with Microbot client
+   - Creates shadow JAR task with plugin-specific dependencies
+   - Parses `@PluginDescriptor` for metadata
+   - Computes SHA256 hash of JAR for `plugins.json`
+
+## Common Patterns
+
+- Plugins extending `SchedulablePlugin` implement `getStartCondition()` and `getStopCondition()` for scheduler integration
+- Use `@Inject` for dependency injection (configs, overlays, scripts)
+- Config classes use `@Provides` methods to register with `ConfigManager`
+- Overlays are registered in `startUp()`, unregistered in `shutDown()`
+- Use `@Subscribe` for event handling (ChatMessage, GameTick, etc.)
+
+## Threading
+
+Scripts run on a scheduled executor thread, but certain RuneLite API calls (widgets, game objects, etc.) must run on the client thread:
 
 ```java
-// ❌ WRONG - Don't instantiate caches
-Rs2NpcCache cache = new Rs2NpcCache();
+// Use invoke() for client thread operations
+TrialInfo info = Microbot.getClientThread().invoke(() -> TrialInfo.getCurrent(client));
 
-// ❌ WRONG - Don't instantiate queryables directly
-Rs2NpcModel npc = new Rs2NpcQueryable().withName("Banker").nearest();
-
-// ✅ CORRECT - Use Microbot.getRs2XxxCache().query()
-Rs2NpcModel npc = Microbot.getRs2NpcCache().query()
-    .withName("Banker")
-    .nearest();
-
-// ✅ CORRECT - Other caches
-Rs2TileObjectModel tree = Microbot.getRs2TileObjectCache().query().withName("Tree").nearest();
-Rs2TileItemModel item = Microbot.getRs2TileItemCache().query().withName("Bones").nearest();
-Rs2PlayerModel player = Microbot.getRs2PlayerCache().query().withName("PlayerName").first();
-
-// ✅ CORRECT - Direct stream access
-Rs2NpcModel firstNpc = Microbot.getRs2NpcCache().getStream()
-    .filter(npc -> npc.getName() != null)
-    .findFirst()
-    .orElse(null);
-
-// ✅ CORRECT - Boat cache (no queryable, direct methods)
-Rs2BoatModel boat = Microbot.getRs2BoatCache().getLocalBoat();
+// For void operations
+Microbot.getClientThread().invoke(() -> {
+    // client thread code here
+});
 ```
 
-### Available Caches
-
-| Cache | Accessor | Methods |
-|-------|----------|---------|
-| `Rs2NpcCache` | `Microbot.getRs2NpcCache()` | `.query()`, `.getStream()` |
-| `Rs2PlayerCache` | `Microbot.getRs2PlayerCache()` | `.query()`, `.getStream()` |
-| `Rs2TileItemCache` | `Microbot.getRs2TileItemCache()` | `.query()`, `.getStream()` |
-| `Rs2TileObjectCache` | `Microbot.getRs2TileObjectCache()` | `.query()`, `.getStream()` |
-| `Rs2BoatCache` | `Microbot.getRs2BoatCache()` | `.getLocalBoat()`, `.getBoat(player)` |
-
-### Boat World View Support
-When querying objects on a boat, use `.fromWorldView()` to search the player's current world view:
-
-```java
-// Query objects in the boat's world view
-var sails = Microbot.getRs2TileObjectCache().query()
-    .fromWorldView()
-    .withName("Sails")
-    .nearest();
-```
-
-## Interaction & Timing Tips
-- Never sleep on the RuneLite client thread; use the script thread with `sleep(...)` / `sleepUntil(...)`.
-- After interactions, wait for state changes (e.g., `Rs2Bank.isOpen()`, `Rs2Player.isAnimating()`).
-- Limit search radius with `.within(...)` to reduce overhead, and cache query results when reusing in a loop.
-
-## Helpful References
-- Example templates: `runelite-client/src/main/java/net/runelite/client/plugins/microbot/example/`.
-- API examples: `api/*/` directories contain `*ApiExample.java` files for NPCs, tile items, players, and objects.
-- Core utilities (legacy but still useful): `microbot/util` (e.g., `Rs2Inventory`, `Rs2Bank`, `Rs2Walker`).
-
-## QuestScript Loop (Quest Helper)
-- `QuestScript.run(config, plugin)` sets a 400–1000ms fixed-delay loop; exits early if quest helper is toggled off, not logged in, paused (`super.run()`), or no quest is selected, and waits out player animations.
-- Captures the active `QuestStep`, marks when dialogue starts, auto-chooses matching dialogue options, and clicks highlighted widgets (special shop buy for Pirate's Treasure).
-- Runs quest-specific logic via `QuestRegistry.getQuest(...).executeCustomLogic()` (Pirate's Treasure gets the plugin injected).
-- While incomplete: handles dialogue quirks (Cook's Assistant/Pirate's Treasure), exits cutscenes, clears walk targets when talking, and manages reachability flags.
-- Requirement phase: equips required items, warns on missing items (rate-limited), and attempts to acquire them by looting nearby or walking toward the defined point; prioritizes item-on-item detailed steps before other step types.
-- Dispatch order: `ConditionalStep` → `NpcStep` → `ObjectStep` → `DigStep` → `PuzzleStep`; per-type handlers choose the correct menu action, manage line-of-sight and walkable tiles, and call `sleepUntil` to wait for movement/animation/interactions before looping.
+**Always use `Microbot.getClientThread().invoke()`** when accessing:
+- Widgets (`client.getWidget()`, `widget.isHidden()`)
+- Game objects that aren't cached
+- Player world view (`client.getLocalPlayer().getWorldView()`)
+- `BoatLocation.fromLocal()` - accesses player world view internally
+- `TrialInfo.getCurrent()` - accesses widgets internally
+- Any RuneLite API that throws "must be called on client thread"
